@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sizzle &amp; Serve — Warung Rush</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: #2b1a12; height: 100%; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { width: min(100vw, 177.78vh); height: min(100vh, 56.25vw); display: block;
+           background: #f7e8c9; box-shadow: 0 0 40px rgba(0,0,0,.6); }
+</style>
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<script>
+'use strict';
+// Sizzle & Serve — Warung Rush. A tiny original cooking game, canvas 2D, no assets,
+// no network. Serve the orders on the ticket board before the dinner-rush timer
+// runs out. Click an ingredient on the counter to add it to the plate, click SERVE
+// when the plate matches the ticket. Wrong ingredient: the plate is tossed.
+// Keys: 1-6 add ingredients, S serve, R restart, Space start.
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = 1280, H = 720;
+
+const params = new URLSearchParams(location.search);
+const SHOT = params.get('shot') || '';
+const SEED = parseInt(params.get('seed') || '1', 10) || 1;
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(SEED);
+
+const INGREDIENTS = [
+  { id: 'bun',     name: 'Bun',     color: '#e8b45a', dark: '#b97f2e', key: '1' },
+  { id: 'patty',   name: 'Patty',   color: '#7a4a21', dark: '#4e2c10', key: '2' },
+  { id: 'cheese',  name: 'Cheese',  color: '#ffcf3d', dark: '#d9a400', key: '3' },
+  { id: 'lettuce', name: 'Lettuce', color: '#7ed957', dark: '#3f9e2e', key: '4' },
+  { id: 'tomato',  name: 'Tomato',  color: '#ff5a4e', dark: '#c22e22', key: '5' },
+  { id: 'sauce',   name: 'Sauce',   color: '#ff9f43', dark: '#d96f00', key: '6' },
+];
+const MENU = [
+  { name: 'Classic Burger', needs: ['bun', 'patty', 'cheese'], price: 40 },
+  { name: 'Garden Burger',  needs: ['bun', 'patty', 'lettuce', 'tomato'], price: 50 },
+  { name: 'Cheesy Melt',    needs: ['bun', 'cheese', 'sauce'], price: 35 },
+  { name: 'Double Stack',   needs: ['bun', 'patty', 'patty', 'cheese'], price: 60 },
+  { name: 'Fresh Salad Bun', needs: ['bun', 'lettuce', 'tomato', 'sauce'], price: 45 },
+];
+const RUSH_SECONDS = 90;
+
+function newOrder(used) {
+  let pick = MENU[Math.floor(rng() * MENU.length)];
+  if (used && used.name === pick.name) pick = MENU[(MENU.indexOf(pick) + 1) % MENU.length];
+  return { name: pick.name, needs: pick.needs.slice(), price: pick.price,
+           patience: 45, maxPatience: 45 };
+}
+
+const state = {
+  phase: 'title', // title | play | end
+  timeLeft: RUSH_SECONDS,
+  score: 0,
+  served: 0,
+  combo: 0,
+  mistakes: 0,
+  plate: [],
+  order: null,
+  nextOrder: null,
+  message: '',
+  messageAt: 0,
+  stars: 0,
+  elapsed: 0,
+};
+
+function resetGame() {
+  state.phase = 'play';
+  state.timeLeft = RUSH_SECONDS;
+  state.score = 0;
+  state.served = 0;
+  state.combo = 0;
+  state.mistakes = 0;
+  state.plate = [];
+  state.order = newOrder(null);
+  state.nextOrder = newOrder(state.order);
+  state.message = 'New order! Build it on the plate.';
+  state.messageAt = state.elapsed;
+}
+
+function plateMatches() {
+  const need = state.order.needs.slice().sort().join(',');
+  const got = state.plate.slice().sort().join(',');
+  return need === got;
+}
+function plateHasExtra() {
+  const need = state.order.needs.slice();
+  for (const id of state.plate) {
+    const i = need.indexOf(id);
+    if (i < 0) return true;
+    need.splice(i, 1);
+  }
+  return false;
+}
+function addIngredient(id) {
+  if (state.phase !== 'play') return;
+  state.plate.push(id);
+  if (plateHasExtra()) {
+    state.mistakes++;
+    state.combo = 0;
+    state.plate = [];
+    state.message = 'Wrong ingredient! Plate tossed.';
+    state.messageAt = state.elapsed;
+  }
+}
+function serve() {
+  if (state.phase !== 'play') return;
+  if (plateMatches()) {
+    const bonus = Math.round(state.order.patience);
+    state.score += state.order.price + bonus;
+    state.served++;
+    state.combo++;
+    state.message = 'Served! +' + (state.order.price + bonus) + '  (combo x' + state.combo + ')';
+    state.messageAt = state.elapsed;
+    state.plate = [];
+    state.order = state.nextOrder;
+    state.nextOrder = newOrder(state.order);
+  } else {
+    state.message = 'Plate does not match the ticket yet!';
+    state.messageAt = state.elapsed;
+  }
+}
+function finishDay() {
+  state.phase = 'end';
+  state.stars = state.served >= 5 ? 3 : state.served >= 3 ? 2 : state.served >= 1 ? 1 : 0;
+}
+
+// ---- deterministic screenshot snapshots (?shot=start|play|end&seed=1) ----
+if (SHOT === 'start') {
+  state.phase = 'title';
+  state.timeLeft = RUSH_SECONDS;
+  state.score = 0; state.served = 0;
+  state.order = { name: 'Classic Burger', needs: ['bun', 'patty', 'cheese'], price: 40, patience: 45, maxPatience: 45 };
+  state.nextOrder = { name: 'Garden Burger', needs: ['bun', 'patty', 'lettuce', 'tomato'], price: 50, patience: 45, maxPatience: 45 };
+  state.message = 'Click START or press Space to open the warung!';
+  state.messageAt = 0;
+} else if (SHOT === 'play') {
+  state.phase = 'play';
+  state.timeLeft = 47;
+  state.score = 120; state.served = 2; state.combo = 2;
+  state.plate = ['bun', 'patty'];
+  state.order = { name: 'Classic Burger', needs: ['bun', 'patty', 'cheese'], price: 40, patience: 31, maxPatience: 45 };
+  state.nextOrder = { name: 'Cheesy Melt', needs: ['bun', 'cheese', 'sauce'], price: 35, patience: 45, maxPatience: 45 };
+  state.message = 'One more: add Cheese, then SERVE!';
+  state.messageAt = 0;
+} else if (SHOT === 'end') {
+  state.phase = 'end';
+  state.timeLeft = 0;
+  state.score = 320; state.served = 5; state.combo = 3; state.mistakes = 1;
+  state.stars = 3;
+  state.order = { name: 'Double Stack', needs: ['bun', 'patty', 'patty', 'cheese'], price: 60, patience: 12, maxPatience: 45 };
+  state.message = 'Dinner rush over!';
+  state.messageAt = 0;
+} else {
+  state.order = newOrder(null);
+  state.nextOrder = newOrder(state.order);
+}
+
+// ---- drawing ----
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function text(str, x, y, size, color, align, weight) {
+  ctx.fillStyle = color;
+  ctx.font = (weight || 'bold') + ' ' + size + 'px Trebuchet MS, Verdana, sans-serif';
+  ctx.textAlign = align || 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(str, x, y);
+}
+function ingredientIcon(id, x, y, r) {
+  const ing = INGREDIENTS.find(function (g) { return g.id === id; });
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = ing.color; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = ing.dark; ctx.stroke();
+  ctx.fillStyle = ing.dark;
+  ctx.font = 'bold ' + Math.round(r * 0.9) + 'px Trebuchet MS, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(ing.name[0], x, y + 1);
+}
+function drawKitchen() {
+  // wall + floor
+  ctx.fillStyle = '#f7e8c9'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ffe9b0'; ctx.fillRect(0, 0, W, 300);
+  ctx.fillStyle = '#c98f4e'; ctx.fillRect(0, 300, W, 14);
+  ctx.fillStyle = '#8a5a2b'; ctx.fillRect(0, 314, W, H - 314);
+  // wall tiles
+  ctx.fillStyle = 'rgba(180,120,60,.25)';
+  for (let x = 0; x < W; x += 80) ctx.fillRect(x, 0, 2, 300);
+  for (let y = 0; y < 300; y += 60) ctx.fillRect(0, y, W, 2);
+  // window with a street view
+  ctx.fillStyle = '#7ec8e3'; rr(60, 40, 220, 150, 12); ctx.fill();
+  ctx.fillStyle = '#fff3c4'; ctx.beginPath(); ctx.arc(240, 80, 26, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#5da24a'; ctx.fillRect(60, 160, 220, 30);
+  ctx.strokeStyle = '#8a5a2b'; ctx.lineWidth = 6; rr(60, 40, 220, 150, 12); ctx.stroke();
+  // hanging pans
+  for (let i = 0; i < 3; i++) {
+    const px = 1020 + i * 70;
+    ctx.strokeStyle = '#5b3a1e'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(px, 40); ctx.lineTo(px, 70); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, 95, 24, 0, Math.PI * 2);
+    ctx.fillStyle = i === 1 ? '#c0c0c0' : '#8c8c8c'; ctx.fill(); ctx.stroke();
+  }
+  // stove with a sizzling pan
+  ctx.fillStyle = '#3d3d3d'; rr(60, 340, 260, 90, 10); ctx.fill();
+  ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(140, 380, 42, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ff8c42'; ctx.beginPath(); ctx.arc(140, 380, 30, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#7a4a21'; ctx.beginPath(); ctx.arc(140, 380, 20, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ffcf3d';
+  for (let i = 0; i < 5; i++) {
+    const a = state.elapsed * 2 + i * 1.3;
+    ctx.beginPath(); ctx.arc(140 + Math.cos(a) * 14, 352 - (i * 3), 3, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = '#e8b45a'; rr(230, 355, 70, 60, 8); ctx.fill();
+  text('PAN', 265, 385, 16, '#5b3a1e', 'center');
+}
+function drawTicket(order, x, y, w, label) {
+  ctx.fillStyle = '#fffdf5'; rr(x, y, w, 150, 10); ctx.fill();
+  ctx.strokeStyle = '#d9a400'; ctx.lineWidth = 3; rr(x, y, w, 150, 10); ctx.stroke();
+  ctx.fillStyle = '#ff5a4e'; ctx.fillRect(x, y, w, 30);
+  text(label, x + w / 2, y + 15, 15, '#fff', 'center');
+  text(order.name, x + w / 2, y + 52, 22, '#3d2b1f', 'center');
+  const names = order.needs.map(function (id) {
+    return INGREDIENTS.find(function (g) { return g.id === id; }).name;
+  });
+  text(names.join('  +  '), x + w / 2, y + 84, 17, '#5b3a1e', 'center');
+  text('$' + order.price, x + w / 2, y + 112, 18, '#2e7d32', 'center');
+  const frac = Math.max(0, order.patience / order.maxPatience);
+  ctx.fillStyle = '#eee'; rr(x + 16, y + 130, w - 32, 10, 5); ctx.fill();
+  ctx.fillStyle = frac > 0.5 ? '#7ed957' : frac > 0.25 ? '#ffcf3d' : '#ff5a4e';
+  rr(x + 16, y + 130, (w - 32) * frac, 10, 5); ctx.fill();
+}
+function drawPlate() {
+  const cx = 640, cy = 470;
+  ctx.beginPath(); ctx.ellipse(cx, cy, 190, 60, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+  ctx.lineWidth = 4; ctx.strokeStyle = '#c9a86a'; ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(cx, cy, 150, 44, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#f3e6c8'; ctx.fill();
+  // stacked ingredients on the plate
+  state.plate.forEach(function (id, i) {
+    const y = cy - 18 - i * 22;
+    ingredientIcon(id, cx - 60 + (i % 3) * 60, y, 26);
+  });
+  if (state.plate.length === 0) text('empty plate — click ingredients below', cx, cy - 6, 16, '#9a7b4f', 'center');
+  text('PLATE', cx, cy + 78, 15, '#fff3c4', 'center');
+}
+function drawCounter() {
+  ctx.fillStyle = '#a06a35'; rr(40, 560, 1200, 130, 14); ctx.fill();
+  ctx.fillStyle = '#c98f4e'; rr(40, 560, 1200, 14, 7); ctx.fill();
+  INGREDIENTS.forEach(function (g, i) {
+    const x = 130 + i * 150, y = 625;
+    ctx.fillStyle = '#fffdf5'; rr(x - 62, y - 52, 124, 104, 12); ctx.fill();
+    ctx.strokeStyle = '#d9a400'; ctx.lineWidth = 2; rr(x - 62, y - 52, 124, 104, 12); ctx.stroke();
+    ingredientIcon(g.id, x, y - 14, 24);
+    text(g.name, x, y + 24, 16, '#3d2b1f', 'center');
+    text('[' + g.key + ']', x, y + 44, 12, '#9a7b4f', 'center');
+  });
+  // SERVE button
+  const ok = state.phase === 'play' && state.plate.length > 0;
+  ctx.fillStyle = ok ? '#2e7d32' : '#9e9e9e'; rr(1070, 585, 130, 80, 12); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; rr(1070, 585, 130, 80, 12); ctx.stroke();
+  text('SERVE', 1135, 618, 24, '#fff', 'center');
+  text('[S]', 1135, 646, 13, '#e8f5e9', 'center');
+}
+function drawHUD() {
+  ctx.fillStyle = 'rgba(43,26,18,.85)'; rr(16, 10, 1248, 46, 10); ctx.fill();
+  text('SIZZLE & SERVE — Warung Rush', 30, 33, 22, '#ffcf3d', 'left');
+  const mm = Math.floor(state.timeLeft / 60), ss = Math.floor(state.timeLeft % 60);
+  text('⏱ ' + mm + ':' + (ss < 10 ? '0' : '') + ss, 640, 33, 24, state.timeLeft <= 15 ? '#ff5a4e' : '#fff', 'center');
+  text('Score $' + state.score + '   •   Served ' + state.served + '   •   Combo x' + state.combo, 1250, 33, 20, '#fff', 'right');
+}
+function drawOverlay(title, lines, button) {
+  ctx.fillStyle = 'rgba(43,26,18,.72)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fffdf5'; rr(340, 130, 600, 440, 18); ctx.fill();
+  ctx.strokeStyle = '#d9a400'; ctx.lineWidth = 4; rr(340, 130, 600, 440, 18); ctx.stroke();
+  text(title, 640, 190, 40, '#c22e22', 'center');
+  lines.forEach(function (l, i) { text(l, 640, 250 + i * 40, 20, '#3d2b1f', 'center'); });
+  ctx.fillStyle = '#2e7d32'; rr(520, 470, 240, 64, 12); ctx.fill();
+  text(button, 640, 502, 24, '#fff', 'center');
+}
+function render() {
+  drawKitchen();
+  if (state.order) drawTicket(state.order, 360, 60, 340, 'ORDER NOW');
+  if (state.nextOrder) drawTicket(state.nextOrder, 730, 60, 300, 'UP NEXT');
+  drawPlate();
+  drawCounter();
+  drawHUD();
+  if (state.message && state.elapsed - state.messageAt < 4) {
+    ctx.fillStyle = 'rgba(43,26,18,.85)'; rr(390, 520, 500, 34, 8); ctx.fill();
+    text(state.message, 640, 537, 17, '#ffcf3d', 'center');
+  }
+  if (state.phase === 'title') {
+    drawOverlay('SIZZLE & SERVE', [
+      'The dinner rush is on! Read the ticket,',
+      'click ingredients onto the plate, hit SERVE.',
+      'Wrong ingredient? The plate gets tossed.',
+      'Serve 5 orders before the timer ends for 3 stars.',
+    ], 'START  [Space]');
+  } else if (state.phase === 'end') {
+    const stars = '★'.repeat(state.stars) + '☆'.repeat(3 - state.stars);
+    drawOverlay('DAY COMPLETE!', [
+      stars,
+      'Score: $' + state.score + '    Served: ' + state.served + ' dishes',
+      'Mistakes: ' + state.mistakes,
+      state.stars === 3 ? 'Three stars — the warung loves you!' : 'Press R to cook another day.',
+    ], 'PLAY AGAIN  [R]');
+  }
+}
+
+// ---- input ----
+function hit(x, y) {
+  if (state.phase === 'title') { resetGame(); return; }
+  if (state.phase === 'end') { resetGame(); return; }
+  if (x >= 1070 && x <= 1200 && y >= 585 && y <= 665) { serve(); return; }
+  INGREDIENTS.forEach(function (g, i) {
+    const bx = 130 + i * 150, by = 625;
+    if (x >= bx - 62 && x <= bx + 62 && y >= by - 52 && y <= by + 52) addIngredient(g.id);
+  });
+}
+cv.addEventListener('click', function (e) {
+  const r = cv.getBoundingClientRect();
+  hit((e.clientX - r.left) * (W / r.width), (e.clientY - r.top) * (H / r.height));
+});
+document.addEventListener('keydown', function (e) {
+  if (state.phase === 'title' && (e.key === ' ' || e.key === 'Enter')) { resetGame(); return; }
+  if (state.phase === 'end' && (e.key === 'r' || e.key === 'R' || e.key === ' ')) { resetGame(); return; }
+  if (state.phase !== 'play') return;
+  if (e.key === 's' || e.key === 'S') serve();
+  if (e.key === 'r' || e.key === 'R') resetGame();
+  INGREDIENTS.forEach(function (g) { if (e.key === g.key) addIngredient(g.id); });
+});
+
+// ---- loop ----
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  state.elapsed += dt;
+  if (state.phase === 'play' && !SHOT) {
+    state.timeLeft -= dt;
+    if (state.order) state.order.patience = Math.max(0, state.order.patience - dt);
+    if (state.order && state.order.patience <= 0) {
+      state.mistakes++;
+      state.combo = 0;
+      state.message = 'Order timed out! Customer left angry.';
+      state.messageAt = state.elapsed;
+      state.order = state.nextOrder;
+      state.nextOrder = newOrder(state.order);
+    }
+    if (state.timeLeft <= 0) { state.timeLeft = 0; finishDay(); }
+  }
+  render();
+  requestAnimationFrame(frame);
+}
+render();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
